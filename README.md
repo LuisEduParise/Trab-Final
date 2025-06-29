@@ -1,0 +1,1 @@
+This is my sad attempt at building a MIP solver using Guroby as an LP engine. It uses branch and bound to find the best integer solution with many, many badly implemented techniques to accelerate the search.
