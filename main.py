@@ -26,7 +26,7 @@ def main():
     
     try:
         # Opção 1: Carregar de um arquivo .MPS
-        problem = create_problem_from_mps("mas76.mps")
+        problem = create_problem_from_mps("instances/mas76.mps")
 
         # Opção 2: Gerar um problema programaticamente (mantenha comentado se usar MPS)
         #problem = create_factory_location_problem(
@@ -36,7 +36,7 @@ def main():
         #)
 
         # Opção 3: João Knapsack
-        #problem = create_problem_from_file("knapsack_test_2.txt")
+        #problem = create_problem_from_file("/instances/knapsack_test_2.txt")
 
         print(f"\nProblema '{problem.name}' carregado. {len(problem.variables)} variáveis, {len(problem.constraints)} restrições.")
         print("\n" + "="*50)
