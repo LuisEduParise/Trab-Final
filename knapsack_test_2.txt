@@ -1,0 +1,36 @@
+][NAME]
+DesafioCargaUtilMarte
+
+[OBJECTIVE]
+max: 50x_Espectrometro + 45x_Magnetometro + 80x_Perfuratriz + 35x_SensorClima + 60x_BracoRobotico + 95x_LaboratorioQuimico + 40x_SensorUV + 75x_RadarSubsolo + 110x_PainelSolarXL + 25x_AntenaComum + 15x_Termometro + 55x_SensorMetano + 120x_GeradorRTG + 65x_CameraPanoramica + 30x_Microscopio + 85x_ColetorAmostras + 40x_BateriaExtra + 20x_RodaExtra + 90x_ComputadorAvancado + 50x_EscudoTermico
+
+[CONSTRAINTS]
+Massa_kg: 12x_Espectrometro + 8x_Magnetometro + 25x_Perfuratriz + 5x_SensorClima + 18x_BracoRobotico + 30x_LaboratorioQuimico + 4x_SensorUV + 22x_RadarSubsolo + 35x_PainelSolarXL + 6x_AntenaComum + 2x_Termometro + 7x_SensorMetano + 40x_GeradorRTG + 15x_CameraPanoramica + 9x_Microscopio + 28x_ColetorAmostras + 15x_BateriaExtra + 10x_RodaExtra + 13x_ComputadorAvancado + 16x_EscudoTermico <= 150
+
+Volume_m3: 15x_Espectrometro + 10x_Magnetometro + 30x_Perfuratriz + 5x_SensorClima + 25x_BracoRobotico + 40x_LaboratorioQuimico + 3x_SensorUV + 20x_RadarSubsolo + 50x_PainelSolarXL + 8x_AntenaComum + 2x_Termometro + 8x_SensorMetano + 35x_GeradorRTG + 12x_CameraPanoramica + 7x_Microscopio + 25x_ColetorAmostras + 10x_BateriaExtra + 25x_RodaExtra + 10x_ComputadorAvancado + 20x_EscudoTermico <= 200
+
+Energia_W: 10x_Espectrometro + 8x_Magnetometro + 20x_Perfuratriz + 5x_SensorClima + 15x_BracoRobotico + 25x_LaboratorioQuimico + 6x_SensorUV + 18x_RadarSubsolo - 30x_PainelSolarXL + 4x_AntenaComum + 1x_Termometro + 9x_SensorMetano - 80x_GeradorRTG + 12x_CameraPanoramica + 5x_Microscopio + 20x_ColetorAmostras + 20x_BateriaExtra + 2x_RodaExtra + 22x_ComputadorAvancado + 10x_EscudoTermico <= 75
+
+Compatibilidade: 1x_Perfuratriz + 1x_LaboratorioQuimico - 1x_ColetorAmostras <= 1
+
+[BINARY]
+x_Espectrometro
+x_Magnetometro
+x_Perfuratriz
+x_SensorClima
+x_BracoRobotico
+x_LaboratorioQuimico
+x_SensorUV
+x_RadarSubsolo
+x_PainelSolarXL
+x_AntenaComum
+x_Termometro
+x_SensorMetano
+x_GeradorRTG
+x_CameraPanoramica
+x_Microscopio
+x_ColetorAmostras
+x_BateriaExtra
+x_RodaExtra
+x_ComputadorAvancado
+x_EscudoTermico
