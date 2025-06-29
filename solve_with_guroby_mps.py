@@ -38,13 +38,13 @@ def solve_mps_with_gurobi(filepath: str):
             print(f"Valor da Função Objetivo: {model.ObjVal:.4f}")
             
             print("\n--- Solução (variáveis não nulas) ---")
-            #solution_found = False
-            #for v in model.getVars():
-            #    if abs(v.X) > 1e-6:
-            #        print(f"  {v.VarName}: {v.X:.2f}")
-            #        solution_found = True
-            #if not solution_found:
-            #    print("  Nenhuma variável com valor não-nulo na solução.")
+            solution_found = False
+            for v in model.getVars():
+                if abs(v.X) > 1e-6:
+                    print(f"  {v.VarName}: {v.X:.2f}")
+                    solution_found = True
+            if not solution_found:
+                print("  Nenhuma variável com valor não-nulo na solução.")
 
         elif model.Status == GRB.INFEASIBLE:
             print("O modelo foi provado como inviável.")
@@ -71,7 +71,7 @@ if __name__ == "__main__":
     else:
         # Se nenhum argumento for passado, usa um nome padrão.
         # Altere este nome para o seu arquivo .mps.
-        file_to_solve = "mas76.mps"
+        file_to_solve = "instances/instance_0003.mps"
         print(f"AVISO: Nenhum arquivo especificado. Usando o padrão: '{file_to_solve}'")
         print("Uso: python solve_with_gurobi.py <caminho_para_o_arquivo.mps>")
     

@@ -33,7 +33,7 @@ class NodeProcessor:
         model.optimize()
         if model.Status != GRB.OPTIMAL:
             print("[Feasibility Pump]: LP inicial inviável."); return None
-        for i in range(20):
+        for i in range(40):
             lp_solution = {v.VarName: v.X for v in model.getVars()}
             if self._select_most_fractional(lp_solution) is None:
                 if self._is_solution_feasible(lp_solution):
@@ -106,6 +106,33 @@ class NodeProcessor:
             score = (f_down * pc_down) + (f_up * pc_up)
             if score > best_score: best_score, best_var = score, var_name
         return best_var
+    
+    def _run_rounding_heuristic(self, model: gp.Model) -> Optional[Dict]:
+        """
+        Executa uma heurística de arredondamento simples.
+        Pega a solução LP atual, arredonda as variáveis inteiras e verifica a viabilidade.
+        """
+        try:
+            lp_solution = {v.VarName: v.X for v in model.getVars()}
+            rounded_solution = {}
+            
+            for var_name, var_value in lp_solution.items():
+                if var_name in self.integer_variables:
+                    rounded_solution[var_name] = round(var_value)
+                else:
+                    rounded_solution[var_name] = var_value # Mantém variáveis contínuas
+            
+            if self._is_solution_feasible(rounded_solution):
+                # Solução viável encontrada!
+                cost = self._calculate_solution_cost(rounded_solution)
+                # Retorna um dicionário no mesmo formato dos outros resultados
+                return {'type': 'solution', 'value': cost, 'solution': rounded_solution}
+
+        except Exception:
+            # Se algo der errado (ex: variável não encontrada), apenas ignora.
+            pass
+        
+        return None
 
     def _select_most_fractional(self, solution: Dict[str, float]) -> Optional[str]:
         best_var, max_frac_dist = None, -1
@@ -118,10 +145,17 @@ class NodeProcessor:
         return best_var
 
     def _select_branching_variable(self, solution: Dict[str, float]) -> Optional[str]:
+        # --- INÍCIO DA ALTERAÇÃO DE TESTE ---
+        # FORÇAR O USO DA ESTRATÉGIA MAIS SIMPLES
+        # Isso remove a complexidade dos pseudocustos para ver se o problema é heurístico.
+        #return self._select_most_fractional(solution)
+        # --- FIM DA ALTERAÇÃO DE TESTE ---s
+
+        # CÓDIGO ORIGINAL (Mantenha comentado durante o teste)
         if self.local_node_count <= self.warmup_nodes:
-            return self._select_most_fractional(solution)
+             return self._select_most_fractional(solution)
         else:
-            return self._select_by_pseudocost(solution) or self._select_most_fractional(solution)
+             return self._select_by_pseudocost(solution) or self._select_most_fractional(solution)
 
     def process_node(self, node: Node, best_bound_so_far: float, cut_pool: List[Constraint]) -> List:
         self.local_node_count += 1
@@ -129,6 +163,13 @@ class NodeProcessor:
         model.optimize()
         
         results, is_min = [], self.problem.sense == "minimize"
+        
+        # --- INÍCIO DA ALTERAÇÃO ---
+        # Tenta a heurística de arredondamento a cada 200 nós como uma chance de encontrar um incumbente
+        if self.local_node_count % 200 == 0 and model.Status == GRB.OPTIMAL:
+            rounding_result = self._run_rounding_heuristic(model)
+            if rounding_result:
+                results.append(rounding_result)
         
         if model.Status == GRB.OPTIMAL:
             self._update_pseudocosts(node, model.ObjVal)
@@ -205,18 +246,42 @@ class NodeProcessor:
     def _generate_knapsack_cuts(self, solution: Dict[str, float], cut_pool: List[Constraint]) -> List[Constraint]:
         new_cuts = []
         for const in self.problem.constraints:
-            if const.sense != '<=' or not all(v in self.binary_variables for v in const.coeffs.keys()): continue
+            # Condição 1: Apenas restrições do tipo '<='
+            if const.sense != '<=':
+                continue
+            
+            # Condição 2: Apenas restrições onde todas as variáveis são binárias
+            if not all(v in self.binary_variables for v in const.coeffs.keys()):
+                continue
+
+            # --- INÍCIO DA CORREÇÃO ---
+            # Condição 3 (NOVA): A teoria de cortes de cobertura assume coeficientes positivos.
+            # Ignoramos restrições com coeficientes não-positivos para garantir a validade dos cortes.
+            if not all(c > self.tolerance for c in const.coeffs.values()):
+                continue
+            # --- FIM DA CORREÇÃO ---
+
             items_in_cover = {v: c for v, c in const.coeffs.items() if solution[v] > self.tolerance}
             cover_weight = sum(items_in_cover.values())
-            if cover_weight <= const.rhs: continue
+
+            if cover_weight <= const.rhs:
+                continue
+
             minimal_cover = dict(items_in_cover)
-            for var_name, coeff in items_in_cover.items():
-                if cover_weight - coeff > const.rhs: del minimal_cover[var_name]; cover_weight -= coeff
-            if not minimal_cover: continue
+            # A iteração sobre uma cópia evita problemas ao deletar do dicionário original.
+            for var_name, coeff in list(items_in_cover.items()):
+                if cover_weight - coeff > const.rhs:
+                    del minimal_cover[var_name]
+                    cover_weight -= coeff
+            
+            if not minimal_cover:
+                continue
+            
             cut_rhs = len(minimal_cover) - 1
             if sum(solution[v] for v in minimal_cover.keys()) > cut_rhs + self.tolerance:
                 new_cut = Constraint(coeffs={v: 1.0 for v in minimal_cover.keys()}, sense='<=', rhs=float(cut_rhs))
-                if new_cut not in cut_pool: new_cuts.append(new_cut)
+                if new_cut not in cut_pool:
+                    new_cuts.append(new_cut)
         return new_cuts
 
 class ParallelWorker:
@@ -263,25 +328,15 @@ class ParallelWorker:
             if self.local_heap:
                 if self.is_idle: self.shared_state.decrement_idle_worker_count(); self.is_idle = False
                 
-                # Garante que o bound reportado é sempre o melhor do heap local.
-                best_local_bound_to_report = None
-                if self.problem.sense == 'minimize':
-                    min_bound = float('inf')
-                    for node in self.local_heap:
-                        if node.lp_bound is not None and node.lp_bound < min_bound:
-                            min_bound = node.lp_bound
-                    if min_bound < float('inf'):
-                        best_local_bound_to_report = min_bound
-                else: # Maximize
-                    max_bound = -float('inf')
-                    for node in self.local_heap:
-                        if node.lp_bound is not None and node.lp_bound > max_bound:
-                            max_bound = node.lp_bound
-                    if max_bound > -float('inf'):
-                        best_local_bound_to_report = max_bound
-
-                if best_local_bound_to_report is not None:
-                    self.shared_state.update_worker_best_bound(self.worker_id, best_local_bound_to_report)
+                # --- INÍCIO DA ALTERAÇÃO (OTIMIZAÇÃO) ---
+                # Otimização: O melhor bound local está sempre no topo do heap (índice 0).
+                # Isso evita percorrer toda a lista a cada iteração.
+                best_node_in_heap = self.local_heap[0]
+                if best_node_in_heap.lp_bound is not None:
+                    # Reporta o bound real do nó para o estado compartilhado.
+                    # A ordenação do heap já garante que este é o melhor bound local.
+                    self.shared_state.update_worker_best_bound(self.worker_id, best_node_in_heap.lp_bound)
+                # --- FIM DA ALTERAÇÃO ---
                 
                 node_to_process = heapq.heappop(self.local_heap)
                 current_global_cuts = self.shared_state.get_cuts()
@@ -315,16 +370,34 @@ class ParallelWorker:
             except Empty: return
 
     def _handle_steal_request(self, requester_id: int):
+        # A lógica só é acionada se houver nós suficientes para compartilhar (pelo menos 2).
         if len(self.local_heap) > 1:
             num_to_share = len(self.local_heap) // 2
-            if Node.strategy == 'dfs':
-                nodes_to_share = heapq.nsmallest(num_to_share, self.local_heap)
-            else:
-                nodes_to_share = heapq.nlargest(num_to_share, self.local_heap)
-                
-            self.local_heap = [node for node in self.local_heap if node not in nodes_to_share]
-            heapq.heapify(self.local_heap)
-            if nodes_to_share: self.work_queues[requester_id].put({'type': 'WORK_RESPONSE', 'nodes': nodes_to_share})
+            
+            # --- INÍCIO DA CORREÇÃO DEFINITIVA ---
+            # A tentativa de usar um 'set' falhou porque a classe 'Node' não é 'hashable'.
+            # A nova abordagem ordena a lista de nós e a divide, o que é seguro e correto.
+
+            # Ordena a lista de nós. O método __lt__ da classe Node garante que os
+            # nós mais promissores (melhores bounds) virão primeiro.
+            sorted_nodes = sorted(self.local_heap)
+            
+            # Calcula quantos nós o worker atual irá manter.
+            num_to_keep = len(self.local_heap) - num_to_share
+            
+            # Divide a lista ordenada: os melhores para manter, os piores para compartilhar.
+            nodes_to_keep = sorted_nodes[:num_to_keep]
+            nodes_to_share = sorted_nodes[num_to_keep:]
+            
+            # Atualiza o heap local apenas com os nós que o worker decidiu manter.
+            self.local_heap = nodes_to_keep
+            # É crucial chamar heapify para restaurar a invariante de heap na lista,
+            # que foi modificada.
+            heapq.heapify(self.local_heap) 
+            
+            # Envia os nós "piores" para o worker que solicitou.
+            if nodes_to_share:
+                self.work_queues[requester_id].put({'type': 'WORK_RESPONSE', 'nodes': nodes_to_share})
 
     def _handle_work_response(self, nodes: List[Node]):
         if nodes:

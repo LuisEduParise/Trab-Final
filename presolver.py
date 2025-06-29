@@ -86,7 +86,7 @@ def _analysis_worker(args):
     return singleton_updates, removable_singletons, redundant_constraints
 
 class Presolver:
-    def __init__(self, problem: MIPProblem, use_probing: bool = True, probe_limit: int = 50, num_workers: int = None):
+    def __init__(self, problem: MIPProblem, use_probing: bool = True, probe_limit: int = 500, num_workers: int = None):
         self.problem = problem.copy()
         self.modifications = 0
         self.vars_map = {var.name: var for var in self.problem.variables}
@@ -110,11 +110,86 @@ class Presolver:
             print(f"{tech:<25s} | {count:>16d}")
         print("-" * 45)
 
+    def _calculate_variable_locks(self):
+        """
+        Calcula os contadores up_locks e down_locks para cada variável.
+        Esta informação é fundamental para a heurística de Dual Fixing. 
+        """
+        # Primeiro, reseta os contadores de todas as variáveis
+        for var in self.vars_map.values():
+            var.up_locks = 0
+            var.down_locks = 0
+
+        # Itera sobre cada restrição para calcular os locks
+        for const in self.problem.constraints:
+            for var_name, coeff in const.coeffs.items():
+                if abs(coeff) < self.tolerance:
+                    continue
+
+                var = self.vars_map[var_name]
+                
+                if const.sense == '<=':
+                    if coeff > 0:
+                        var.up_locks += 1
+                    else: # coeff < 0
+                        var.down_locks += 1
+                elif const.sense == '>=':
+                    if coeff > 0:
+                        var.down_locks += 1
+                    else: # coeff < 0
+                        var.up_locks += 1
+                elif const.sense == '==':
+                    # Uma igualdade restringe o movimento em ambas as direções
+                    var.up_locks += 1
+                    var.down_locks += 1
+
+    def _apply_dual_fixing(self):
+        """
+        Aplica a técnica de Dual Fixing (Seção 10.8 de Achterberg).
+        Usa os locks e os coeficientes da função objetivo para fixar variáveis.
+        """
+        fixings_found = 0
+        # Assumimos que o sentido é "minimize". A lógica é invertida para "maximize".
+        sense_multiplier = 1.0 if self.problem.sense == "minimize" else -1.0
+
+        # Iteramos sobre as variáveis para checar se podem ser fixadas
+        for var_name, var in list(self.vars_map.items()):
+            # Pula variáveis que já estão fixadas
+            if var.lb > var.ub - self.tolerance:
+                continue
+
+            objective_coeff = self.problem.objective.get(var_name, 0.0) * sense_multiplier
+
+            # Caso 1: Fixar no limite inferior (lower bound)
+            # Se o objetivo quer minimizar a variável (coeff >= 0) e não há
+            # restrições impedindo-a de diminuir (down_locks == 0).
+            if objective_coeff >= -self.tolerance and var.down_locks == 0:
+                # Fixa a variável ao tornar seu limite superior igual ao inferior
+                var.ub = var.lb
+                fixings_found += 1
+                
+            # Caso 2: Fixar no limite superior (upper bound)
+            # Se o objetivo quer maximizar a variável (coeff < 0) e não há
+            # restrições impedindo-a de aumentar (up_locks == 0).
+            elif objective_coeff < self.tolerance and var.up_locks == 0:
+                # Fixa a variável ao tornar seu limite inferior igual ao superior
+                var.lb = var.ub
+                fixings_found += 1
+
+        if fixings_found > 0:
+            print(f"  -> Fixação Dual (Dual Fixing) fixou {fixings_found} variáveis.")
+            self.modifications += fixings_found
+            self.stats['Fixações por Fixação Dual'] += fixings_found
+
     def presolve(self) -> MIPProblem:
         print(f"--- Iniciando a rotina de Presolve (usando até {self.num_workers} processos) ---")
         round_num = 1
         while True:
             self.modifications = 0
+
+            self._calculate_variable_locks()
+
+            self._apply_dual_fixing()
             
             # ATUALIZADO: Executa análise de singletons e redundância em paralelo
             self._apply_parallel_analysis()
