@@ -26,6 +26,25 @@ class NodeProcessor:
         self.warmup_nodes = 500
         self.local_node_count = 0
 
+        self._initialize_pseudocosts()
+
+    def _initialize_pseudocosts(self):
+        """
+        Inicializa os pseudocustos com base nos coeficientes da função objetivo
+        para fornecer um ponto de partida mais inteligente.
+        """
+        for var_name in self.integer_variables:
+            obj_coeff = abs(self.problem.objective.get(var_name, 0.0))
+            
+            # Um valor pequeno para garantir que não seja zero, mais o coeficiente do objetivo
+            initial_value = 1e-6 + obj_coeff
+
+            # Pré-popula os pseudocustos. Usamos count=1 para que a média já comece com este valor.
+            self.pseudocosts[var_name]['down']['sum_degrad'] = initial_value
+            self.pseudocosts[var_name]['down']['count'] = 1
+            self.pseudocosts[var_name]['up']['sum_degrad'] = initial_value
+            self.pseudocosts[var_name]['up']['count'] = 1
+
     def run_feasibility_pump(self) -> Optional[Dict]:
         print("[Feasibility Pump]: Iniciando busca por solução inicial...")
         root_node = Node()
@@ -33,7 +52,7 @@ class NodeProcessor:
         model.optimize()
         if model.Status != GRB.OPTIMAL:
             print("[Feasibility Pump]: LP inicial inviável."); return None
-        for i in range(40):
+        for i in range(1):
             lp_solution = {v.VarName: v.X for v in model.getVars()}
             if self._select_most_fractional(lp_solution) is None:
                 if self._is_solution_feasible(lp_solution):
@@ -55,13 +74,24 @@ class NodeProcessor:
         return None
 
     def _is_solution_feasible(self, solution: Dict[str, float]) -> bool:
+        # --- INÍCIO DA CORREÇÃO ---
+        # 1. Verifica os bounds das variáveis (adição crucial)
+        for var_name, var_value in solution.items():
+            var_def = self.vars_map.get(var_name)
+            if var_def:
+                if var_value < var_def.lb - self.tolerance or var_value > var_def.ub + self.tolerance:
+                    return False # Violação de bound da variável
+        # --- FIM DA CORREÇÃO ---
+
+        # 2. Verifica as restrições lineares (lógica existente e correta)
         for const in self.problem.constraints:
             activity = sum(coeff * solution.get(var, 0) for var, coeff in const.coeffs.items())
             if const.sense == '<=' and activity > const.rhs + self.tolerance: return False
             if const.sense == '>=' and activity < const.rhs - self.tolerance: return False
             if const.sense == '==' and abs(activity - const.rhs) > self.tolerance: return False
+            
         return True
-
+    
     def _calculate_solution_cost(self, solution: Dict[str, float]) -> float:
         return sum(coeff * solution.get(var, 0) for var, coeff in self.problem.objective.items())
 
@@ -95,6 +125,9 @@ class NodeProcessor:
         stats['count'] += 1
 
     def _select_by_pseudocost(self, solution: Dict[str, float]) -> Optional[str]:
+
+        RELIABILITY_THRESHOLD = 5 # Atinge confiança total após 5 observações
+
         best_var, best_score = None, -1.0
         fractional_vars = [v for v in self.integer_variables if abs(solution[v] - round(solution[v])) > self.tolerance]
         if not fractional_vars: return None
@@ -103,9 +136,64 @@ class NodeProcessor:
             down_stats, up_stats = self.pseudocosts[var_name]['down'], self.pseudocosts[var_name]['up']
             pc_down = (down_stats['sum_degrad'] / down_stats['count']) if down_stats['count'] > 0 else 1.0
             pc_up = (up_stats['sum_degrad'] / up_stats['count']) if up_stats['count'] > 0 else 1.0
-            score = (f_down * pc_down) + (f_up * pc_up)
+            # Calcula a confiabilidade como uma média dos counts de up e down
+            total_count = down_stats['count'] + up_stats['count']
+            reliability = min(1.0, total_count / (2 * RELIABILITY_THRESHOLD))
+            # A pontuação original é ponderada pela confiabilidade
+            score = reliability * ((f_down * pc_down) + (f_up * pc_up))
+            #score = (f_down * pc_down) + (f_up * pc_up)
             if score > best_score: best_score, best_var = score, var_name
         return best_var
+    
+    def _run_coefficient_diving(self, initial_model: gp.Model, max_dive_depth: int = 20) -> Optional[Dict]:
+        """
+        Executa uma heurística de mergulho baseada nos 'locks' dos coeficientes.
+        Tenta encontrar uma solução inteira escolhendo o caminho de menor resistência.
+        """
+        dive_model = initial_model.copy()
+        
+        for depth in range(max_dive_depth):
+            dive_model.optimize()
+
+            if dive_model.Status != GRB.OPTIMAL:
+                return None
+
+            solution = {v.VarName: v.X for v in dive_model.getVars()}
+            frac_vars = {v:solution[v] for v in self.integer_variables if abs(solution[v] - round(solution[v])) > self.tolerance}
+            
+            if not frac_vars:
+                if self._is_solution_feasible(solution):
+                    cost = self._calculate_solution_cost(solution)
+                    print(f"[CoefficientDiving]: Solução viável encontrada com custo {cost:.2f}!")
+                    return {'type': 'solution', 'value': cost, 'solution': solution}
+                else:
+                    return None
+            
+            # --- LÓGICA PRINCIPAL DA HEURÍSTICA ---
+            # Escolhe a variável com o menor número de locks na direção do arredondamento
+            best_var_name = None
+            min_locks = float('inf')
+
+            for var_name, frac_value in frac_vars.items():
+                var_def = self.vars_map[var_name]
+                # Se arredondarmos para baixo, o risco são os down_locks
+                if frac_value - int(frac_value) < 0.5:
+                    if var_def.down_locks < min_locks:
+                        min_locks = var_def.down_locks
+                        best_var_name = var_name
+                # Se arredondarmos para cima, o risco são os up_locks
+                else:
+                    if var_def.up_locks < min_locks:
+                        min_locks = var_def.up_locks
+                        best_var_name = var_name
+            
+            if best_var_name is None: return None # Não encontrou candidato
+            
+            var_to_fix = dive_model.getVarByName(best_var_name)
+            rounded_val = round(var_to_fix.X)
+            var_to_fix.lb, var_to_fix.ub = rounded_val, rounded_val
+
+        return None
     
     def _run_rounding_heuristic(self, model: gp.Model) -> Optional[Dict]:
         """
@@ -143,6 +231,43 @@ class NodeProcessor:
                 if best_var is None or frac_dist_from_half < max_frac_dist:
                     max_frac_dist, best_var = frac_dist_from_half, var_name
         return best_var
+    
+    def _run_diving_heuristic(self, initial_model: gp.Model, max_dive_depth: int = 10) -> Optional[Dict]:
+        """
+        Executa uma heurística de mergulho baseada em fracionalidade (Algorithm 9.1 de Achterberg).
+        Tenta encontrar uma solução inteira de forma gananciosa.
+        """
+        # Trabalhamos com uma cópia do modelo para não alterar o original do nó
+        dive_model = initial_model.copy()
+        
+        for depth in range(max_dive_depth):
+            dive_model.optimize()
+
+            if dive_model.Status != GRB.OPTIMAL:
+                return None # Mergulho falhou
+
+            solution = {v.VarName: v.X for v in dive_model.getVars()}
+            
+            # Verifica se a solução já é inteira
+            frac_vars = [v for v in self.integer_variables if abs(solution[v] - round(solution[v])) > self.tolerance]
+            if not frac_vars:
+                # SUCESSO! Encontramos uma solução inteira
+                cost = self._calculate_solution_cost(solution)
+                print(f"[Diving Heuristic]: Solução viável encontrada com custo {cost:.2f}!")
+                return {'type': 'solution', 'value': cost, 'solution': solution}
+
+            # Heurística: escolhe a variável mais fracionária para arredondar
+            best_var_name = max(frac_vars, key=lambda v_name: abs(solution[v_name] - round(solution[v_name])))
+            var_to_fix = dive_model.getVarByName(best_var_name)
+            
+            # Arredonda para o inteiro mais próximo
+            rounded_val = round(var_to_fix.X)
+            
+            # Fixa a variável no valor arredondado e continua o mergulho
+            var_to_fix.lb = rounded_val
+            var_to_fix.ub = rounded_val
+        
+        return None # Atingiu a profundidade máxima sem sucesso
 
     def _select_branching_variable(self, solution: Dict[str, float]) -> Optional[str]:
         # --- INÍCIO DA ALTERAÇÃO DE TESTE ---
@@ -164,13 +289,12 @@ class NodeProcessor:
         
         results, is_min = [], self.problem.sense == "minimize"
         
-        # --- INÍCIO DA ALTERAÇÃO ---
-        # Tenta a heurística de arredondamento a cada 200 nós como uma chance de encontrar um incumbente
+        # Heurística de arredondamento (esta pode ficar, pois não tem dependências externas)
         if self.local_node_count % 200 == 0 and model.Status == GRB.OPTIMAL:
             rounding_result = self._run_rounding_heuristic(model)
             if rounding_result:
                 results.append(rounding_result)
-        
+
         if model.Status == GRB.OPTIMAL:
             self._update_pseudocosts(node, model.ObjVal)
             for _ in range(5):
@@ -285,8 +409,9 @@ class NodeProcessor:
         return new_cuts
 
 class ParallelWorker:
-    def __init__(self, worker_id: int, problem: MIPProblem, shared_state: SharedState, work_queues: List[mp.Queue], termination_event: MpEvent):
+    def __init__(self, worker_id: int, problem: MIPProblem, shared_state: SharedState, work_queues: List[mp.Queue], termination_event: MpEvent, switch_event: MpEvent):
         self.worker_id, self.problem, self.shared_state, self.work_queues, self.termination_event = worker_id, problem, shared_state, work_queues, termination_event
+        self.switch_to_bb_event = switch_event
         self.my_queue = self.work_queues[self.worker_id]
         self.node_processor = NodeProcessor(self.problem)
         self.local_heap: List[Node] = []
@@ -295,12 +420,10 @@ class ParallelWorker:
         print(f"[Worker {self.worker_id}]: Iniciado.")
 
     def run(self):
-        if not self.shared_state.has_solution.value:
-            Node.strategy = "dfs"
-            if self.worker_id == 0:
-                print(f"[Worker 0]: Todos os workers iniciando com a estratégia DFS.")
-        else:
-            Node.strategy = "best_bound"
+        # Todos os workers iniciam com DFS
+        Node.strategy = "dfs"
+        if self.worker_id == 0:
+            print(f"[Worker 0]: Todos os workers iniciando com a estratégia DFS.")
 
         if self.worker_id == 0:
             initial_solution = self.node_processor.run_feasibility_pump()
@@ -319,8 +442,9 @@ class ParallelWorker:
             heapq.heappush(self.local_heap, root_node)
             
         while not self.termination_event.is_set():
-            if self.shared_state.has_solution.value and Node.strategy != "best_bound":
-                print(f"[Worker {self.worker_id}]: Primeira solução encontrada! Trocando para estratégia Best-Bound.")
+            # --- MUDANÇA: Verifica o evento de troca a cada iteração ---
+            if self.switch_to_bb_event.is_set() and Node.strategy != "best_bound":
+                print(f"[Worker {self.worker_id}]: Sinal do Monitor recebido. Trocando para estratégia Best-Bound.")
                 Node.strategy = "best_bound"
                 heapq.heapify(self.local_heap)
 
@@ -328,28 +452,41 @@ class ParallelWorker:
             if self.local_heap:
                 if self.is_idle: self.shared_state.decrement_idle_worker_count(); self.is_idle = False
                 
-                # --- INÍCIO DA ALTERAÇÃO (OTIMIZAÇÃO) ---
-                # Otimização: O melhor bound local está sempre no topo do heap (índice 0).
-                # Isso evita percorrer toda a lista a cada iteração.
                 best_node_in_heap = self.local_heap[0]
                 if best_node_in_heap.lp_bound is not None:
-                    # Reporta o bound real do nó para o estado compartilhado.
-                    # A ordenação do heap já garante que este é o melhor bound local.
                     self.shared_state.update_worker_best_bound(self.worker_id, best_node_in_heap.lp_bound)
-                # --- FIM DA ALTERAÇÃO ---
                 
                 node_to_process = heapq.heappop(self.local_heap)
                 current_global_cuts = self.shared_state.get_cuts()
-                results = self.node_processor.process_node(node_to_process, self.shared_state.get_best_cost(), current_global_cuts)
-                self.shared_state.increment_nodes_processed()
-                new_cuts_found = []
-                for res in results:
-                    if res['type'] == 'node': heapq.heappush(self.local_heap, res['node'])
-                    elif res['type'] == 'solution':
-                        if self.shared_state.update_best_solution(res['value'], res['solution']):
-                            pass
-                    elif res['type'] == 'cut': new_cuts_found.append(res['cut'])
-                if new_cuts_found: self.shared_state.add_cuts(new_cuts_found)
+                run_main_processing = True
+
+                node_count = self.node_processor.local_node_count
+                if not self.shared_state.has_solution.value:
+                    heuristic_to_run = None
+                    if node_count % 1000 == 0:
+                        heuristic_to_run = self.node_processor._run_coefficient_diving
+                    elif node_count % 500 == 0:
+                        heuristic_to_run = self.node_processor._run_diving_heuristic
+                    
+                    if heuristic_to_run:
+                        temp_model = self.node_processor._build_gurobi_model(node_to_process, current_global_cuts)
+                        temp_model.optimize()
+                        if temp_model.Status == GRB.OPTIMAL:
+                            heuristic_result = heuristic_to_run(temp_model)
+                            if heuristic_result:
+                                self.shared_state.update_best_solution(heuristic_result['value'], heuristic_result['solution'])
+                
+                if run_main_processing:
+                    results = self.node_processor.process_node(node_to_process, self.shared_state.get_best_cost(), current_global_cuts)
+                    self.shared_state.increment_nodes_processed()
+                    new_cuts_found = []
+                    for res in results:
+                        if res['type'] == 'node': heapq.heappush(self.local_heap, res['node'])
+                        elif res['type'] == 'solution':
+                            if self.shared_state.update_best_solution(res['value'], res['solution']):
+                                pass
+                        elif res['type'] == 'cut': new_cuts_found.append(res['cut'])
+                    if new_cuts_found: self.shared_state.add_cuts(new_cuts_found)
             else:
                 if not self.is_idle:
                     self.shared_state.increment_idle_worker_count(); self.is_idle = True
@@ -407,9 +544,9 @@ class ParallelWorker:
         target_id = random.choice([i for i in range(self.num_workers) if i != self.worker_id])
         self.work_queues[target_id].put({'type': 'STEAL_REQUEST', 'from_id': self.worker_id})
 
-def worker_entry_point(worker_id: int, problem: MIPProblem, shared_state: SharedState, work_queues: List[mp.Queue], termination_event: MpEvent):
+def worker_entry_point(worker_id: int, problem: MIPProblem, shared_state: SharedState, work_queues: List[mp.Queue], termination_event: MpEvent, switch_event: MpEvent):
     try:
-        worker = ParallelWorker(worker_id, problem, shared_state, work_queues, termination_event)
+        worker = ParallelWorker(worker_id, problem, shared_state, work_queues, termination_event, switch_event)
         worker.run()
     except Exception as e:
         print(f"[Worker {worker_id}]: ERRO FATAL - {e}"); traceback.print_exc()
@@ -446,10 +583,17 @@ class WorkStealingSolver:
         try:
             shared_state = SharedState(self.num_workers, self.problem.sense)
             termination_event = mp.Event()
+            
+            # --- MUDANÇA 1: Criar o novo evento para a troca de estratégia ---
+            switch_to_bb_event = mp.Event()
+            
             work_queues = [mp.Queue() for _ in range(self.num_workers)]
             
             for i in range(self.num_workers):
-                p = mp.Process(target=worker_entry_point, args=(i, self.problem, shared_state, work_queues, termination_event))
+                # --- MUDANÇA 2: Passar o novo evento para o processo do worker ---
+                p = mp.Process(target=worker_entry_point, args=(
+                    i, self.problem, shared_state, work_queues, termination_event, switch_to_bb_event
+                ))
                 workers.append(p)
                 p.start()
             
@@ -457,7 +601,9 @@ class WorkStealingSolver:
             last_best_cost = shared_state.get_best_cost()
             
             is_min = self.problem.sense == "minimize"
-            global_best_dual = float('-inf') if is_min else float('inf')
+
+            consecutive_gap_count = 0
+            CONSECUTIVE_GAP_CHECKS_REQUIRED = 5
             
             while not termination_event.is_set():
                 if self.timeout and (time.time() - start_time) > self.timeout:
@@ -478,17 +624,22 @@ class WorkStealingSolver:
                 
                 valid_worker_bounds = [b for b in worker_bounds if b is not None and ((is_min and b < float('inf')) or (not is_min and b > -float('inf')))]
 
+                best_dual = float('-inf') if is_min else float('inf') # Valor padrão
                 if valid_worker_bounds:
-                    current_best_from_workers = min(valid_worker_bounds) if is_min else max(valid_worker_bounds)
-                    
-                    if is_min:
-                        global_best_dual = max(global_best_dual, current_best_from_workers)
-                    else:
-                        global_best_dual = min(global_best_dual, current_best_from_workers)
-
-                best_dual = global_best_dual
+                    best_dual = min(valid_worker_bounds) if is_min else max(valid_worker_bounds)
                 
                 gap = self._calculate_gap(best_primal, best_dual)
+
+                # --- MUDANÇA 3: Adicionar gatilho para acionar o evento de troca ---
+                # O valor 0.005 corresponde a 0.6% de gap.
+                if gap < 0.006: # Gap de 0.6%
+                    consecutive_gap_count += 1
+                else:
+                    consecutive_gap_count = 0 # Reseta o contador se o gap aumentar
+
+                if consecutive_gap_count >= CONSECUTIVE_GAP_CHECKS_REQUIRED and not switch_to_bb_event.is_set():
+                    print(f"\n[Monitor]: Gap < 0.6% por {CONSECUTIVE_GAP_CHECKS_REQUIRED} checagens. Sinalizando para workers trocarem para Best-Bound...")
+                    switch_to_bb_event.set()
                 
                 if gap < self.mip_gap_tolerance:
                     print(f"\n[Monitor]: CRITÉRIO DE PARADA ATINGIDO: Gap de otimalidade ({gap:.4f}%) < tolerância.")

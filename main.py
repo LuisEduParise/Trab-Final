@@ -26,11 +26,11 @@ def main():
     
     try:
         # Opção 1: Carregar de um arquivo .MPS
-        problem = create_problem_from_mps("instances/instance_0003.mps")
+        problem = create_problem_from_mps("instances/mas76.mps")
 
         # Opção 2: Gerar um problema programaticamente (mantenha comentado se usar MPS)
         #problem = create_factory_location_problem(
-        ##     num_fabricas=50, 
+        #     num_fabricas=50, 
         #     num_clientes=200, 
         #    seed=123
         #)
@@ -55,9 +55,9 @@ def main():
         solver = WorkStealingSolver(
             simplified_problem,
             num_workers=None,
-            timeout=600,
+            timeout=600-presolve_time,
             stagnation_limit=500000,
-            mip_gap_tolerance=0.01
+            mip_gap_tolerance=0.00001
         )
         
         best_cost, best_solution = solver.solve()
