@@ -71,7 +71,7 @@ if __name__ == "__main__":
     else:
         # Se nenhum argumento for passado, usa um nome padrão.
         # Altere este nome para o seu arquivo .mps.
-        file_to_solve = "instances/assign1-5-8.mps"
+        file_to_solve = "instances/model_S1_Jc0_Js9_T96.mps"
         print(f"AVISO: Nenhum arquivo especificado. Usando o padrão: '{file_to_solve}'")
         print("Uso: python solve_with_gurobi.py <caminho_para_o_arquivo.mps>")
     
